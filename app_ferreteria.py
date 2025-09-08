@@ -20,11 +20,11 @@ st.set_page_config(
 def init_connection():
     try:
         conn = psycopg2.connect(
-            host="localhost",
-            database="ferreteria_db",
-            user="postgres",
-            password="postgres",
-            port="5432"
+            host=st.secrets["DB_HOST"],
+            database=st.secrets["DB_NAME"],
+            user=st.secrets["DB_USER"],
+            password=st.secrets["DB_PASSWORD"],
+            port=st.secrets["DB_PORT"]
         )
         return conn
     except Exception as e:
