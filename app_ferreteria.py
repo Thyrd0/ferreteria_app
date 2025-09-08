@@ -25,6 +25,7 @@ def init_connection():
             user=st.secrets["DB_USER"],
             password=st.secrets["DB_PASSWORD"],
             port=st.secrets["DB_PORT"]
+            sslmode="require"
         )
         return conn
     except Exception as e:
