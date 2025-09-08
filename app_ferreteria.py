@@ -7,25 +7,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-import psycopg2
-import streamlit as st
-
-@st.cache_resource
-def init_connection():
-    try:
-        conn = psycopg2.connect(
-            host=st.secrets["DB_HOST"],
-            database=st.secrets["DB_NAME"],
-            user=st.secrets["DB_USER"],
-            password=st.secrets["DB_PASSWORD"],
-            port=st.secrets["DB_PORT"]
-        )
-        return conn
-    except Exception as e:
-        st.error(f"❌ Error de conexión: {e}")
-        return None
-
-
 # Configuración de la página
 st.set_page_config(
     page_title="Sistema Gestión Ferretería",
