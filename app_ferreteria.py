@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import psycopg2
@@ -6,6 +5,8 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from fpdf import FPDF
+import json
 
 # Configuración de la página
 st.set_page_config(
@@ -20,12 +21,11 @@ st.set_page_config(
 def init_connection():
     try:
         conn = psycopg2.connect(
-            host=st.secrets["DB_HOST"],
-            database=st.secrets["DB_NAME"],
-            user=st.secrets["DB_USER"],
-            password=st.secrets["DB_PASSWORD"],
-            port=st.secrets["DB_PORT"],
-            sslmode="require"
+            host="localhost",
+            database="ferreteria_db",
+            user="postgres",
+            password="postgres",
+            port="5432"
         )
         return conn
     except Exception as e:
@@ -75,12 +75,24 @@ def login():
     password = st.sidebar.text_input("Contraseña", type="password", value="admin123")
 
     if st.sidebar.button("🚀 Ingresar", use_container_width=True):
-        if username == "admin" and password == "admin123":
+        user_data = ejecutar_consulta(
+            """
+            SELECT username, nombre, rol
+            FROM usuarios
+            WHERE username = %s AND password = %s AND activo = true
+            """,
+            (username, password)
+        )
+        if user_data:
             st.session_state.logged_in = True
-            st.session_state.user = {"username": "admin", "nombre": "Administrador", "rol": "admin"}
+            st.session_state.user = {
+                "username": user_data[0][0],
+                "nombre": user_data[0][1],
+                "rol": user_data[0][2]
+            }
             st.rerun()
         else:
-            st.sidebar.error("Credenciales incorrectas. Use admin/admin123")
+            st.sidebar.error("❌ Usuario o contraseña incorrectos o inactivo")
 
 # Dashboard principal
 def dashboard():
@@ -143,6 +155,82 @@ def dashboard():
     if stock_bajo_data:
         df_stock = pd.DataFrame(stock_bajo_data, columns=['ID', 'Producto', 'Stock Actual', 'Stock Mínimo'])
         st.dataframe(df_stock, use_container_width=True)
+
+# Módulo generar ticket venta
+def generar_ticket(venta_id):
+    # Obtener cabecera
+    venta = ejecutar_consulta("""
+        SELECT v.id, v.numero_factura, v.fecha_venta, v.total, 
+               COALESCE(c.nombre,'Consumidor Final') as cliente, v.metodo_pago
+        FROM ventas v
+        LEFT JOIN clientes c ON v.cliente_id = c.id
+        WHERE v.id = %s
+    """, (venta_id,))
+
+    # Obtener detalles
+    detalles = ejecutar_consulta("""
+        SELECT p.nombre, vd.cantidad, vd.precio
+        FROM venta_detalles vd
+        JOIN productos p ON vd.producto_id = p.id
+        WHERE vd.venta_id = %s
+    """, (venta_id,))
+
+    # Crear PDF
+    pdf = FPDF("P", "mm", (80, 200))  # ancho tipo ticket
+    pdf.add_page()
+    pdf.set_font("Courier", "B", 12)
+
+    # Encabezado
+    pdf.cell(60, 5, "FERRETERIA 'COMPRA Y PAGA'", ln=True, align="C")
+    pdf.set_font("Courier", "", 10)
+    pdf.cell(60, 5, "Av. Principal 123", ln=True, align="C")
+    pdf.cell(60, 5, "RUC: 123456789", ln=True, align="C")
+    pdf.ln(5)
+
+    # Datos factura
+    pdf.set_font("Courier", "", 9)
+    pdf.cell(60, 5, f"Factura: {venta[0][1]}", ln=True)
+    pdf.cell(60, 5, f"Fecha: {venta[0][2].strftime('%d/%m/%Y %H:%M')}", ln=True)
+    pdf.cell(60, 5, f"Cliente: {venta[0][4]}", ln=True)
+    pdf.cell(60, 5, f"Metodo: {venta[0][5]}", ln=True)
+    pdf.ln(3)
+
+    # Línea divisoria
+    pdf.cell(60, 5, "-"*32, ln=True, align="C")
+
+    # Detalles productos
+    pdf.set_font("Courier", "B", 9)
+    pdf.cell(25, 5, "Producto", border=0)
+    pdf.cell(10, 5, "Cant", border=0, align="R")
+    pdf.cell(15, 5, "Precio", border=0, align="R")
+    pdf.cell(15, 5, "Total", border=0, align="R")
+    pdf.ln(5)
+
+    pdf.set_font("Courier", "", 9)
+    for d in detalles:
+        nombre, cant, precio = d
+        subtotal = cant * precio
+        pdf.cell(25, 5, nombre[:12], border=0)  # cortar nombre largo
+        pdf.cell(10, 5, str(cant), border=0, align="R")
+        pdf.cell(15, 5, f"{precio:.2f}", border=0, align="R")
+        pdf.cell(15, 5, f"{subtotal:.2f}", border=0, align="R")
+        pdf.ln(5)
+
+    # Línea divisoria
+    pdf.cell(60, 5, "-"*32, ln=True, align="C")
+
+    # Total
+    pdf.set_font("Courier", "B", 10)
+    pdf.cell(50, 5, "TOTAL", border=0, align="R")
+    pdf.cell(15, 5, f"{venta[0][3]:.2f}", border=0, align="R")
+    pdf.ln(10)
+
+    # Mensaje final
+    pdf.set_font("Courier", "", 9)
+    pdf.cell(60, 5, "Gracias por su compra!", ln=True, align="C")
+    pdf.cell(60, 5, "Vuelva pronto", ln=True, align="C")
+
+    return pdf.output(dest="S").encode("latin-1")
 
 # Módulo de productos
 def modulo_productos():
@@ -209,6 +297,9 @@ def modulo_ventas():
       st.success(st.session_state.mensaje_exito)
       del st.session_state.mensaje_exito  # se borra después de mostrarlo
 
+    if "carrito" not in st.session_state:
+        st.session_state.carrito = []
+
     # Obtener productos activos
     productos = ejecutar_consulta("""
         SELECT id, nombre, precio_venta, stock_actual
@@ -221,55 +312,55 @@ def modulo_ventas():
         st.warning("No hay productos disponibles para la venta")
         return
 
-    # Formulario de venta
-    with st.form("form_venta"):
-        st.subheader("Nueva Venta")
-
-        # Selección de productos (incluyendo ID en la opción)
-        selected_products = st.multiselect(
-            "Seleccionar Productos",
-            options=[f"{p[0]} - {p[1]} - ${p[2]} (Stock: {p[3]})" for p in productos],
-            format_func=lambda x: x
+    col1, col2 = st.columns(2)
+    with col1:
+        producto_sel = st.selectbox(
+            "Seleccionar Producto",
+            [f"{p[0]} - {p[1]} - ${p[2]} (Stock: {p[3]})" for p in productos]
         )
+    with col2:
+        cantidad = st.number_input("Cantidad", min_value=1, value=1)
 
-        # Detalles de la venta
-        col1, col2 = st.columns(2)
-        with col1:
-            metodo_pago = st.selectbox("Método de Pago", ["Efectivo", "Tarjeta", "Transferencia"])
-        with col2:
-            cliente_id = st.number_input("ID Cliente (opcional)", min_value=1, value=1)
+    if st.button("➕ Agregar al Carrito"):
+        prod_id = int(producto_sel.split('-')[0].strip())
+        nombre = producto_sel.split('-')[1].strip()
+        precio = float(producto_sel.split('$')[1].split(' ')[0])
+        st.session_state.carrito.append({
+            "producto_id": prod_id,
+            "nombre": nombre,
+            "precio": precio,
+            "cantidad": cantidad
+        })
+        st.success(f"{nombre} agregado al carrito")
 
-        if st.form_submit_button("💳 Procesar Venta"):
-            if selected_products:
-                try:
-                    # Construir lista de detalles de venta
-                    detalles = []
-                    for prod in selected_products:
-                        prod_id = int(prod.split('-')[0].strip())
-                        precio = float(prod.split('$')[1].split(' ')[0])
-                        detalles.append({"producto_id": prod_id, "cantidad": 1, "precio": precio})
+    if st.session_state.carrito:
+        df_carrito = pd.DataFrame(st.session_state.carrito)
+        df_carrito['Subtotal'] = df_carrito['precio'] * df_carrito['cantidad']
+        st.dataframe(df_carrito, use_container_width=True)
+        total = df_carrito['Subtotal'].sum()
+        st.metric("Total", f"${total:,.2f}")
 
-                    import json
-                    detalles_json = json.dumps(detalles)
+        metodo_pago = st.selectbox("Método de Pago", ["Efectivo", "Tarjeta", "Transferencia"])
+        cliente_id = st.number_input("ID Cliente", min_value=1, value=1)
 
-                    # Ejecutar procedimiento almacenado (solo una vez)
-                    resultado = ejecutar_sp("sp_registrar_venta", (detalles_json, cliente_id, 1, metodo_pago))
+        if st.button("💳 Procesar Venta"):
+            try:
+                detalles_json = json.dumps(st.session_state.carrito)
+                resultado = ejecutar_sp("sp_registrar_venta", (detalles_json, cliente_id, 1, metodo_pago))
+                if resultado:
+                    venta_id = resultado[0][0]
+                    total_venta = resultado[0][2]
+                    st.success(f"✅ Venta procesada! Total: ${total_venta:,.2f}")
 
-                    if resultado:
-                        data = resultado[0][0]  # el SP devuelve un JSON en la primera columna
-                        if data.get("success"):
-                          #st.success(f"✅ Venta procesada exitosamente! Total: ${data['total']:,.2f}")
-                          st.session_state.mensaje_exito = f"✅ Venta procesada exitosamente! Total: ${data['total']:,.2f}"
-                          st.rerun()  # refrescar dashboard
-                        else:
-                          st.error("❌ Error registrando la venta")
-                    else:
-                      st.error("❌ No se recibió respuesta del procedimiento almacenado")
+                    pdf_data = generar_ticket(venta_id)
+                    st.download_button("📥 Descargar Ticket", pdf_data, "ticket.pdf", "application/pdf")
 
-                except Exception as e:
-                    st.error(f"❌ Ocurrió un error al procesar la venta: {e}")
-            else:
-              st.error("❌ Seleccione al menos un producto")
+                    st.session_state.carrito = []
+                else:
+                    st.error("❌ No se pudo registrar la venta")
+            except Exception as e:
+                st.error(f"Ocurrió un error: {e}")
+
 
 
 # Celda: Módulo de Gestión de Clientes (agregar al archivo app_ferreteria.py)
@@ -781,7 +872,32 @@ def modulo_reportes():
         else:
             st.warning("❌ Solo los administradores pueden ejecutar consultas personalizadas")
 
-# Navegación principal
+# Modulo perfil de usuario
+def perfil_usuario():
+    st.title("👤 Mi Perfil")
+    user = st.session_state.user
+
+    st.subheader("Información del Usuario")
+    st.write(f"**Usuario:** {user['username']}")
+    st.write(f"**Nombre:** {user['nombre']}")
+    st.write(f"**Rol:** {user['rol']}")
+
+    with st.form("form_editar_perfil"):
+        nuevo_nombre = st.text_input("Nombre", value=user['nombre'])
+        nuevo_email = st.text_input("Email", value=user.get('email', ""))
+        nueva_password = st.text_input("Nueva Contraseña", type="password")
+
+        if st.form_submit_button("💾 Actualizar Perfil"):
+            ejecutar_consulta("""
+                UPDATE usuarios
+                SET nombre = %s, email = %s, password = COALESCE(NULLIF(%s,''), password)
+                WHERE username = %s
+            """, (nuevo_nombre, nuevo_email, nueva_password, user['username']))
+            st.success("✅ Perfil actualizado exitosamente")
+            st.session_state.user['nombre'] = nuevo_nombre
+            st.session_state.user['email'] = nuevo_email
+
+# Navegación principal con roles
 def main():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
@@ -793,21 +909,61 @@ def main():
         st.sidebar.markdown(f"**Rol:** {st.session_state.user['rol']}")
         st.sidebar.markdown("---")
 
-        menu = st.sidebar.selectbox(
-            "📋 Navegación",
-            ["Dashboard", "Productos", "Ventas", "Reportes", "Clientes"]
-        )
+        rol = st.session_state.user['rol']
 
+        # Menú dinámico según rol
+        if rol == "admin":
+            menu = st.sidebar.selectbox(
+                "📋 Navegación",
+                ["Dashboard", "Productos", "Ventas", "Clientes", "Reportes", "Perfil"]
+            )
+        elif rol == "vendedor":
+            menu = st.sidebar.selectbox(
+                "📋 Navegación",
+                ["Ventas", "Clientes", "Perfil"]
+            )
+        elif rol == "inventarista":
+            menu = st.sidebar.selectbox(
+                "📋 Navegación",
+                ["Productos", "Perfil"]
+            )
+        else:
+            st.error("🚫 Rol no reconocido")
+            return
+
+        # Cargar módulos según menú y permisos
         if menu == "Dashboard":
-            dashboard()
+            if rol == "admin":
+                dashboard()
+            else:
+                st.error("🚫 No tienes permiso para acceder al Dashboard")
+
         elif menu == "Productos":
-            modulo_productos()
+            if rol in ["admin", "inventarista"]:
+                modulo_productos()
+            else:
+                st.error("🚫 No tienes permiso para gestionar productos")
+
         elif menu == "Ventas":
-            modulo_ventas()
-        elif menu == "Reportes":
-            modulo_reportes()
+            if rol in ["admin", "vendedor"]:
+                modulo_ventas()
+            else:
+                st.error("🚫 No tienes permiso para procesar ventas")
+
         elif menu == "Clientes":
-            modulo_clientes()
+            if rol in ["admin", "vendedor"]:
+                modulo_clientes()
+            else:
+                st.error("🚫 No tienes permiso para gestionar clientes")
+
+        elif menu == "Reportes":
+            if rol == "admin":
+                modulo_reportes()
+            else:
+                st.error("🚫 Solo el administrador puede ver reportes")
+
+        elif menu == "Perfil":
+            perfil_usuario()
 
         st.sidebar.markdown("---")
         if st.sidebar.button("🚪 Cerrar Sesión", use_container_width=True):
