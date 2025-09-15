@@ -4,4 +4,6 @@ pandas
 plotly
 numpy
 matplotlib
+
 seaborn
+fpdf
